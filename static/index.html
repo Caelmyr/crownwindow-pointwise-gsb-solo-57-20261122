@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#17392d">
+  <title>CrownWindow · Canopy Observation</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <header id="topbar" class="mast">
+    <button class="wordmark" type="button" data-act="home" aria-label="CrownWindow home"><span class="symbol" aria-hidden="true"></span>CrownWindow</button>
+    <div class="mast-actions">
+      <button type="button" class="plain" data-act="packets">Read evidence</button>
+      <button type="button" class="primary" data-act="new">New station</button>
+    </div>
+  </header>
+  <div id="notice" role="status" aria-live="polite" hidden></div>
+  <main id="main" tabindex="-1"><p class="launch">Opening CrownWindow…</p></main>
+  <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+</body>
+</html>

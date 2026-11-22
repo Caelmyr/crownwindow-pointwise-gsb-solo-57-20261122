@@ -1,0 +1,22 @@
+name: solo60-crownwindow
+services:
+  web:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${CROWNWINDOW_BASE_IMAGE:-python:3.11-slim}
+    image: ${CROWNWINDOW_IMAGE:-solo60-crownwindow:1.0}
+    init: true
+    restart: unless-stopped
+    network_mode: bridge
+    ports:
+      - "127.0.0.1:${CROWNWINDOW_PORT:-19963}:8000"
+    volumes:
+      - surveys:/var/lib/crownwindow
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).read()"]
+      interval: 4s
+      timeout: 4s
+      retries: 9
+volumes:
+  surveys:
