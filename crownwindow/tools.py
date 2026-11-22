@@ -15,6 +15,7 @@ from .optics import DEMO_BRIGHTNESS, DEMO_OPTIC_MARKS, lens_model_audit, relativ
 from .patches import native_window
 from .planes import DEMO_PLANES, oriented_surfaces
 from .paths import DEMO_PATH, direct_path, transect
+from .registration import DEMO_CORNERS, wall_registration
 from .result import Result
 from .sharpness import check_samples, field_detail
 from .viewpoint import virtual_view
@@ -107,6 +108,13 @@ TOOLS = {value.id: value for value in (
     Tool("paired-change", "Repeat survey change", "Fieldwork", 2, (
         number("difference_floor", "Luminance change indicator", .08, .005),
     ), "Look for open-to-obstructed changes in matched directions on two repeat photographs.", refind_change, True),
+    Tool("repeat-align", "Repeat wall-corner alignment", "Fieldwork", 2, (
+        structured("corners", "Matching unchanged wall corners", DEMO_CORNERS,
+                   "Each entry needs first/second image points, a near or far band, and support."),
+        number("difference_floor", "Luminance change indicator", .08, .005),
+        number("marking_radius_px", "Corner marking radius (frame px)", 6, .5),
+        number("trust_radius_fraction", "Trust radius (fraction of width)", .30, .01),
+    ), "Register the repeats on unchanged wall corners, keep the untouched comparison, and only trust changes near a trusted corner.", wall_registration),
     Tool("direction-transect", "Direction transect", "Fieldwork", 1, (
         structured("from_direction", "Start bearing, elevation", [2, 10], shape="pair"),
         structured("to_direction", "End bearing, elevation", [85, 60], shape="pair"),

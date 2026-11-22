@@ -26,6 +26,7 @@ from .library import MAX_MARKS_PER_OBSERVATION, MAX_OBSERVATIONS_PER_STATION, MA
 from .mark_exchange import MAX_NOTE_BYTES, field_log, import_log
 from .projection import Lens
 from .packet_reader import evidence_receipt_image, inspect_packet
+from .registration import alignment_probe
 from .result import Asset
 from .sky import Classifier, Controls, native_classes
 from .tools import TOOLS
@@ -384,6 +385,35 @@ def register_analysis(app: Flask, library: Library, executor: Capacity):
                 viewpoint = View.parse(data.get("view"))
             response = perspective_probe(source, viewpoint, positions)
         return {"readings": response, "source": source.public(), "view": viewpoint.public()}
+
+    @app.post("/api/stations/<station>/alignment-probe")
+    def alignment_live(station):
+        data = _request()
+        fields(data, "point", "basis", "settings", "photos", "radius")
+        if len(data.get("photos")) != 2:
+            raise Problem("Choose the two repeat photographs used by the alignment.")
+        radius = real(data.get("radius", 7), "Pixel witness radius", 1, 32)
+        with executor:
+            stored = [_stored_source(library, key) for key in data["photos"]]
+            if any(source.record["station"] != station for source in stored):
+                raise Problem("The repeat observations belong to another station.", 409)
+            evidence = alignment_probe(stored[0], stored[1], data.get("settings"),
+                                       data.get("point"), data.get("basis"), radius)
+        return evidence
+
+    @app.post("/api/retained/<key>/alignment-probe")
+    def alignment_retained(key):
+        data = _request()
+        fields(data, "point", "basis", "radius")
+        radius = real(data.get("radius", 7), "Pixel witness radius", 1, 32)
+        with executor:
+            record = library.retained(key)
+            if record["tool"] != "repeat-align":
+                raise Problem("Open a wall-corner alignment result to probe its changes.", 409)
+            sources = [_retained_source(library, entry) for entry in record["sources"]]
+            evidence = alignment_probe(sources[0], sources[1], record["order"]["settings"],
+                                       data.get("point"), data.get("basis"), radius)
+        return evidence
 
     @app.get("/api/retained/<key>/assets/<name>")
     def result_asset(key, name):

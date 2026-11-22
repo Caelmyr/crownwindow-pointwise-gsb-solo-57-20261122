@@ -9,7 +9,7 @@ const state = {
   settings: {}, orderSettings: null, image: null, activeAsset: null, probe: null, sourceIndex: 0,
   prepared: null, editor: null, marks: [], noLive: false, busy: false,
   lensPane: null, lensDraft: null, colorDraft: null, chosenColor: null, chosenLens: null, asked: null,
-  uploads: {}, folio: null, toolImage: null, loading: 0,
+  uploads: {}, folio: null, toolImage: null, loading: 0, cornerDraft: null,
 };
 let noticeTimer = 0;
 
@@ -109,6 +109,17 @@ function modal(name, body) {
     button("Close", "close", "", "plain compact") + '</header><div class="dialog-body">' + body + "</div>";
   if (!dialog.open) dialog.showModal();
 }
+
+dialog.addEventListener("close", () => {
+  if (state.editor?.kind?.startsWith("corner-")) state.editor = null;
+  if (!dialog.innerHTML.includes('data-form="corner-entry"')) {
+    const abandoned = state.cornerDraft;
+    state.cornerDraft = null;
+    if (abandoned && !abandoned.second && state.selected[0] && state.focus !== state.selected[0]) {
+      focus(state.selected[0]);
+    }
+  }
+});
 
 function form(name, fields, submit, {disabled = false} = {}) {
   return '<form class="form" data-form="' + h(name) + '">' + fields + '<button type="submit" class="primary"' +
@@ -216,6 +227,7 @@ function captureRail() {
 
 const ANGULAR_RESULTS = new Set(["open-class-map.png","lens-support.png","sky-windows.png","weighted-sky.png",
   "camera-luminance.png","sky-basis.png","observed-change.png","brightness-difference.png"]);
+const ALIGN_RESULTS = new Set(["untouched-change.png", "aligned-change.png", "near-change.png"]);
 const NATIVE_RESULTS = new Set(["camera-display.png","camera-clipping.png","line-on-source.png","lens-on-photo.png",
   "class-overlay.png","class-margin.png","path-on-source.png","angular-transect.png","field-on-camera.png",
   "native-detail.png","validation-patches.png","trial-colors.png","lens-on-source.png","landmark-residuals.png"]);
@@ -238,6 +250,7 @@ function stageImage() {
     const asset = reportAssets().find(item => item.name === state.activeAsset);
     if (asset) {
       const mode = ANGULAR_RESULTS.has(asset.name) ? "angular"
+        : ALIGN_RESULTS.has(asset.name) ? "align"
         : ["direction-view.png", "compass-view.png"].includes(asset.name) ? "perspective"
         : NATIVE_RESULTS.has(asset.name) && report()?.sources.length === 1 ? "native-report" : "";
       return {src: assetSrc(asset), label: asset.label || title(asset.name), mode};
@@ -257,6 +270,23 @@ function rectangle(points) {
   return '<i class="marker-box" aria-hidden="true" style="' + css + '"></i>';
 }
 
+function cornerPairs() {
+  const value = state.settings.corners;
+  return Array.isArray(value) ? value : [];
+}
+
+function cornerOverlay() {
+  const active = current();
+  const selected = report()?.sources?.map(source => source.id) || state.selected;
+  const side = active?.id === selected[1] ? "second" : "first";
+  return cornerPairs().map((corner, i) => {
+    const uv = corner?.[side];
+    if (!uv) return "";
+    return dot(uv[0], uv[1], corner.band === "far" ? "warning" : "")
+      .replace("<i ", `<i data-corner="${i + 1}" `);
+  }).join("");
+}
+
 function stage() {
   const picture = stageImage();
   const selected = reportAssets().filter(asset => asset.mime === "image/png");
@@ -267,7 +297,8 @@ function stage() {
     (report()?.sources?.length > 1 ? button("Probe source " + (state.sourceIndex + 1) + "/" + report().sources.length, "cycle-source", "", "plain compact") : "") + "</div>";
   const overlay = state.editor ? state.editor.points.map(point => dot(...point)).join("") +
     (state.editor.kind === "region" && state.editor.points.length === 2 ? rectangle(state.editor.points) : "") :
-    state.probe?.visual ? dot(...state.probe.visual) : "";
+    (state.editor === null && state.tool === "repeat-align" ? cornerOverlay() : "") +
+    (state.probe?.visual ? dot(...state.probe.visual) : "");
   const helper = state.editor ? '<div class="stage-instruction"><span>' + h(state.editor.label) + '</span>' +
     button("Cancel", "draw-cancel", "", "plain compact") + '</div>' : "";
   let frame = '<div class="empty">Add an observation to open the image stage.</div>';
@@ -292,6 +323,10 @@ function optionField(fieldSpec) {
       anchor("Example CSV", "/api/paths/example.csv", "download compact", true) + "</div>";
   }
   if (state.tool === "field-marks" && key === "marks") control += button("Use saved field marks", "use-marks", "", "secondary compact");
+  if (state.tool === "repeat-align" && key === "corners") {
+    control += '<div class="row">' + button("Mark wall corners on both originals", "draw-corner", "", "secondary compact") +
+      button("Clear corner marks", "clear-corners", "", "plain compact") + "</div>";
+  }
   return '<div class="setting">' + control + note + "</div>";
 }
 
@@ -317,6 +352,23 @@ function inspectPane() {
     "</div>" + resultHTML() + probeHTML();
 }
 
+function alignmentBasisHTML(value) {
+  if (value.tool !== "repeat-align" || !value.metrics?.bases) return "";
+  const statusText = {one_move: "Supports one move", strained: "Strained · one move not supported",
+    untouched: "No adjustment"};
+  const cards = value.metrics.bases.map(basis => '<div class="revision' +
+    (basis.id === value.metrics.recommended_basis ? ' recommended' : '') + '"><strong>' + h(basis.label) +
+    (basis.id === value.metrics.recommended_basis ? ' <span class="tag">Recommended</span>' : "") +
+    '</strong><small>' + h(statusText[basis.status] || basis.status) +
+    (basis.shift_px ? " · shift " + basis.shift_px.map(v => Number(v).toFixed(2)).join(", ") + " frame px" : "") +
+    (basis.max_residual_px != null ? " · max residual " + basis.max_residual_px + " px" : "") +
+    '</small><p class="small">' + h(basis.note) + '</p></div>').join("");
+  return '<div class="source-evidence"><h3>Three bases for the same pair</h3><div class="detail-list">' +
+    cards + '</div><p class="small">Trusted change cells: <strong>' + value.metrics.trusted_change_cells +
+    '</strong> · held out for review beyond corner trust: <strong>' + value.metrics.pending_review_cells +
+    "</strong></p></div>";
+}
+
 function resultHTML() {
   const value = report();
   if (!value) return "";
@@ -330,7 +382,7 @@ function resultHTML() {
     asset.label, assetSrc(asset), "download compact", true)).join("");
   const warnings = (value.warnings || []).map(row => '<p class="warn">' + h(row) + '</p>').join("");
   return '<section class="result-body"><h3>' + h(value.name || value.title) + '</h3><p class="small">' + h(value.conclusion) +
-    "</p>" + metrics(value.metrics) + archive +
+    "</p>" + metrics(value.metrics) + alignmentBasisHTML(value) + archive +
     (downloads ? '<div class="row">' + downloads + "</div>" : "") +
     fold("All measurements", value.metrics) + fold("Readings · " + value.row_count, value.readings, true) +
     fold("Source observations", value.sources) + (value.reviews?.length ? fold("Review history", value.reviews, true) : "") + warnings + "</section>";
@@ -347,6 +399,9 @@ function probeHTML() {
 }
 
 function footerHelp() {
+  if (state.tool === "repeat-align" && report()?.probe_kind === "align") {
+    return '<p class="lab-note">Click any change-map cell to open both actual originals and the reference wall corner.</p>';
+  }
   return current() ? '<p class="lab-note">Click an image or direction map to read its source point.</p>' : "";
 }
 
@@ -621,6 +676,28 @@ function enterDraw(kind, label, key = "") {
   render();
 }
 
+function startCornerWizard() {
+  rememberInspection();
+  if (state.selected.length !== 2) throw Error("Tick the earlier and later photograph in comparison order first.");
+  state.cornerDraft = null;
+  return focus(state.selected[0]).then(() => {
+    enterDraw("corner-first", "Step 1 of 2 · mark this same unchanged wall corner on the earlier photograph.");
+  });
+}
+
+function cornerDialog(side) {
+  const band = state.cornerDraft?.band || "near";
+  const suggestion = "Wall corner " + (cornerPairs().length + 1);
+  modal(side === "first" ? "Name the wall corner" : "Finish the wall corner",
+    form("corner-entry",
+      field("Corner label", "corner_label", state.cornerDraft?.label || suggestion, "required maxlength=65") +
+      drop("Wall distance", "corner_band", [["near", "Near wall (trust locally)"], ["far", "Far wall (weaker support)"]], band) +
+      '<div class="cols">' + numberField("Confidence", "corner_support", state.cornerDraft?.support ?? .9, .05, "min=.05 max=1 step=.05 required") +
+      "</div>" + (side === "second" ? '<p class="quiet small">The earlier point was ' +
+        h(state.cornerDraft.first.join(", ")) + " on the first original.</p>" : ""),
+      side === "first" ? "Continue on later photo" : "Keep wall corner"));
+}
+
 function handleDraw(uv) {
   const edit = state.editor;
   if (!edit) return;
@@ -634,6 +711,16 @@ function handleDraw(uv) {
   } else if (edit.kind === "line") {
     state.settings[edit.key] = edit.points;
     cleanResult();
+  } else if (edit.kind === "corner-first") {
+    state.cornerDraft = {first: uv};
+    render();
+    cornerDialog("first");
+    return;
+  } else if (edit.kind === "corner-second") {
+    state.cornerDraft = {...state.cornerDraft, second: uv};
+    render();
+    cornerDialog("second");
+    return;
   } else if (edit.kind === "region") {
     const [a, b] = edit.points;
     if (Math.abs(a[0] - b[0]) < .015 || Math.abs(a[1] - b[1]) < .015) throw Error("Pick opposite corners with room between them.");
@@ -675,6 +762,60 @@ function directionFromAngular(uv, footprint) {
   const bearing = (footprint.bearing + x * footprint.sweep) % 360;
   const elevation = Math.asin(low + (high - low) * (1 - y)) * 180 / Math.PI;
   return [bearing, elevation];
+}
+
+function alignBasisFromAsset(assetName) {
+  if (assetName === "untouched-change.png") return "untouched";
+  if (assetName === "near-change.png") return "near_only";
+  return "global";
+}
+
+async function alignmentEvidence(uv) {
+  const activeReport = report();
+  const basis = alignBasisFromAsset(state.activeAsset || "aligned-change.png");
+  let uri;
+  let body;
+  if (activeReport?.id) {
+    uri = "/api/retained/" + activeReport.id + "/alignment-probe";
+    body = {point: uv, basis, radius: 7};
+  } else {
+    rememberInspection();
+    uri = apiBase() + "/alignment-probe";
+    body = {point: uv, basis, radius: 7, photos: state.selected, settings: state.settings};
+  }
+  const evidence = await rpc(uri, "POST", body);
+  state.probe = {results: {readings: [evidence.first.readout]}, visual: uv, align: evidence};
+  alignmentDialog(evidence);
+  render();
+}
+
+function alignmentDialog(evidence) {
+  const corner = evidence.reference_corner;
+  const trust = corner.within_trust ?
+    '<span class="tag">Within trust radius</span>' : '<span class="tag alert">Outside trust · verify</span>';
+  const card = (side) => {
+    const part = evidence[side];
+    const source = part.source;
+    return '<figure class="align-card"><figcaption><strong>' + h(source.capture.title) + '</strong><small>' +
+      h(source.image.file) + " · px " + h((part.readout.pixel || []).join(", ")) + "</small></figcaption>" +
+      '<a href="' + h(source.original || ("/api/photos/" + source.id + "/original")) +
+      '" target="_blank" rel="noopener"><img src="' + h(assetSrc(part.witness)) +
+      '" alt="Actual original pixels"></a><div class="row">' +
+      anchor("Open full original", source.original || ("/api/photos/" + source.id + "/original"), "plain compact") +
+      "</div></figure>";
+  };
+  modal("Change evidence on both actual originals",
+    '<div class="datum"><span>Basis</span><strong>' + h(title(evidence.basis)) +
+      (evidence.shift_px ? " · shift " + h(evidence.shift_px.map(v => Number(v).toFixed(2)).join(", ")) + " px" : "") +
+      "</strong></div>" +
+    '<div class="datum"><span>Reference wall corner #' + corner.index + " · " + h(corner.label) +
+      ' (' + h(title(corner.band)) + ")</span>" + trust + "</div>" +
+    '<p class="small">Distance to reference corner ' + corner.distance_px + " px against a trust radius of " +
+      corner.trust_radius_px + " px; global fit residual " + corner.global_residual_px + " px.</p>" +
+    '<div class="align-grid">' + card("first") + card("second") + "</div>" +
+    fold("Earlier point readout", evidence.first.readout) +
+    fold("Later point readout", evidence.second.readout) +
+    fold("Reference corner detail", corner));
 }
 
 async function probeRequest(point, space, context, screen = null) {
@@ -725,6 +866,10 @@ async function plateEvent(event) {
     if (position) await probeRequest(position, "direction", "retained", uv);
     return true;
   }
+  if (mode === "align") {
+    await alignmentEvidence(uv);
+    return true;
+  }
   const context = mode === "native-report" || state.image?.source ? "retained" : "live";
   await probeRequest(uv, "image", context, uv);
   return true;
@@ -732,6 +877,11 @@ async function plateEvent(event) {
 
 async function focus(id) {
   if (!find(id)) return;
+  if (state.editor?.kind?.startsWith("corner-") && id !== state.focus &&
+      !(state.cornerDraft && id === state.selected[1])) {
+    announce("Finish or cancel the wall-corner mark before switching photographs.", true);
+    return;
+  }
   state.focus = id;
   if (state.selected.length < 2) state.selected = [id];
   state.editor = null;
@@ -823,6 +973,8 @@ const actions = {
   "draw-region": (key) => { state.colorDraft = colorInput(); enterDraw("region", "Pick opposite corners for the " + title(key) + " sample.", key); },
   "draw-mark": () => enterDraw("mark", "Select the observed camera position."),
   "direction-mark": () => markDialog(),
+  "draw-corner": () => startCornerWizard(),
+  "clear-corners": () => { rememberInspection(); state.settings.corners = []; cleanResult(); render(); },
   "draw-cancel": () => { state.editor = null; render(); },
   "lens-picture": (key) => { state.prepared = state.chosenLens.assets.find(asset => asset.name === key); state.probe = null; render(); },
   "save-lens": saveLens,
@@ -944,6 +1096,24 @@ const submissions = {
       mark: {title: fd.get("title"), role: fd.get("role"), note: fd.get("note"), ...coordinates}});
     dialog.close();
     await choosePrepare("marks");
+  },
+  "corner-entry": async (fd) => {
+    const draft = state.cornerDraft || {};
+    const entry = {label: fd.get("corner_label"), band: fd.get("corner_band"),
+      support: asNumber(fd, "corner_support"), first: draft.first, second: draft.second};
+    dialog.close();
+    if (!draft.second) {
+      state.cornerDraft = entry;
+      await focus(state.selected[1]);
+      enterDraw("corner-second", "Step 2 of 2 · mark the same wall corner (" + h(entry.label) + ") on the later photograph.");
+      return;
+    }
+    rememberInspection();
+    state.settings.corners = [...cornerPairs(), entry];
+    state.cornerDraft = null;
+    cleanResult();
+    await focus(state.selected[0]);
+    announce("Wall corner kept on both originals. Mark another corner or run the inspection.");
   },
   "notes-import": async (fd) => {
     const payload = new FormData();
