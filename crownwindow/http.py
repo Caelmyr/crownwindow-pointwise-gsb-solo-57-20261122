@@ -22,8 +22,10 @@ from .contracts import (Capture, Mark, Problem, Station, boolean, enum, fields, 
 from .demo import EXAMPLES, populate, render_observation
 from .field import direction_readout, image_readout, native_witness
 from .folio import contact_sheet, folio_csv, folio_name, make_folio, render_folio
-from .library import MAX_MARKS_PER_OBSERVATION, MAX_OBSERVATIONS_PER_STATION, MAX_RECORDS_PER_STATION, Library
+from .library import (MAX_MARKS_PER_OBSERVATION, MAX_OBSERVATIONS_PER_STATION,
+                      MAX_OBSTRUCTION_PATCHES, MAX_RECORDS_PER_STATION, Library)
 from .mark_exchange import MAX_NOTE_BYTES, field_log, import_log
+from .obstruction import ObstructionLayer, preview_bundle
 from .projection import Lens
 from .packet_reader import evidence_receipt_image, inspect_packet
 from .result import Asset
@@ -292,6 +294,45 @@ def register_marks(app: Flask, library: Library, executor: Capacity):
         return output
 
 
+def register_typing(app: Flask, library: Library, executor: Capacity):
+    @app.get("/api/photos/<key>/obstruction")
+    def obstruction_layer(key):
+        return library.obstruction(key)
+
+    @app.post("/api/photos/<key>/obstruction/preview")
+    def obstruction_preview(key):
+        data = _request()
+        fields(data, "revision", "layer", "retain", "expected")
+        layer = ObstructionLayer.parse(data.get("layer"))
+        keep = boolean(data.get("retain", False), "Retain layer")
+        with executor:
+            source = _stored_source(library, key)
+            revision = _check_version(source, data.get("revision"))
+            fingerprint = key_of({"source": source.public(), "layer": layer.public()})
+            if keep and data.get("expected") != fingerprint:
+                raise Problem("Preview this exact obstruction layer before saving.", 409)
+            bundle = preview_bundle(source.camera, layer)
+            response = {
+                "fingerprint": fingerprint,
+                "stats": bundle["stats"],
+                "preview": _preview("obstruction-typing.png", "Obstruction typing overlay",
+                                    bundle["overlay"]),
+                "csv_download": {"name": "obstruction-patches.csv", "mime": "text/csv; charset=utf-8",
+                                 "label": "Obstruction patch areas (CSV)",
+                                 "data": base64.b64encode(bundle["csv"]).decode("ascii")},
+                "json_download": {"name": "obstruction-typing.json", "mime": "application/json",
+                                  "label": "Obstruction typing record (JSON)",
+                                  "data": base64.b64encode(bundle["json"]).decode("ascii")},
+            }
+            if keep:
+                saved = library.save_obstruction(key, revision, layer)
+                response["saved"] = saved["saved"]
+                response["photo"] = saved["photo"]
+                response["layer_revision"] = saved["layer_revision"]
+                return response, 201
+        return response
+
+
 def _probe(source: Source, data: dict) -> list[dict]:
     mode = enum(data.get("space", "direction"), "Probe coordinate system", ("direction", "image"))
     locations = data.get("positions")
@@ -501,6 +542,7 @@ def create_app(location: str | Path | None = None) -> Flask:
             "observations_per_station": MAX_OBSERVATIONS_PER_STATION,
             "retained_reports_per_station": MAX_RECORDS_PER_STATION,
             "field_marks_per_observation": MAX_MARKS_PER_OBSERVATION,
+            "obstruction_patches_per_observation": MAX_OBSTRUCTION_PATCHES,
             "portable_packet_bytes": MAX_PACKET_COMPRESSED,
         }
 
@@ -515,6 +557,7 @@ def create_app(location: str | Path | None = None) -> Flask:
     register_library(app, library, executor)
     register_calibration(app, library, executor)
     register_marks(app, library, executor)
+    register_typing(app, library, executor)
     register_analysis(app, library, executor)
     register_archives(app, library, executor)
     register_field_exchange(app, library, executor)

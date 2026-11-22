@@ -92,6 +92,19 @@ small,.quiet{color:var(--soft)}
 .marker{width:15px;height:15px;position:absolute;left:var(--x);top:var(--y);transform:translate(-50%,-50%);border:2px solid #f8cf7d;border-radius:50%;box-shadow:0 0 0 1px #26362b;pointer-events:none}
 .marker-box{position:absolute;pointer-events:none;border:2px solid #ffd884;left:var(--x);top:var(--y);width:var(--w);height:var(--h);background:#ffe28b18}
 .marker.warning{border-color:#ffa186}
+.type-layer{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible}
+.type-layer.is-drawing polygon,.type-layer.is-drawing circle{pointer-events:none}
+.type-layer polygon{cursor:pointer;pointer-events:auto;transition:filter .12s ease}
+.type-layer polygon:hover{filter:brightness(1.18)}
+.type-layer circle{cursor:pointer;pointer-events:auto;vector-effect:none}
+.type-swatch{width:13px;height:13px;border-radius:3px;display:inline-block;border:1px solid #00000022;flex:none}
+.datum .type-swatch{margin-right:7px}
+.type-row{display:grid;gap:7px;border:1px solid var(--line);border-radius:5px;padding:9px;background:var(--white)}
+.type-row.selected{border-color:var(--fern);box-shadow:0 0 0 1px var(--fern) inset;background:#f1f6ec}
+.type-head{display:flex;gap:7px;align-items:center}
+.type-head .type-swatch{align-self:center}
+.type-head strong{overflow-wrap:anywhere}
+.type-head small{margin-left:auto}
 .stage-instruction{background:#f7e6be;border:1px solid #deca99;padding:9px 12px;margin:6px 0;font-size:.84rem;display:flex;align-items:center;justify-content:space-between;border-radius:5px;gap:9px}
 .asset-tabs{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
 .asset-tabs button[aria-pressed=true]{background:#294f3b;color:#fff;border-color:#294f3b}

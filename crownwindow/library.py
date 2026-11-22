@@ -11,6 +11,7 @@ import uuid
 
 from .camera import Camera
 from .contracts import Capture, Mark, Problem, Station, canonical, identifier, sha, token, utc_now
+from .obstruction import ObstructionLayer
 from .projection import Lens
 from .sky import Controls
 
@@ -53,6 +54,13 @@ CREATE TABLE IF NOT EXISTS field_mark (
     document TEXT NOT NULL,
     lens_key TEXT REFERENCES lens_record(key)
 );
+CREATE TABLE IF NOT EXISTS obstruction_layer (
+    photograph TEXT PRIMARY KEY REFERENCES photograph(key),
+    created TEXT NOT NULL,
+    updated TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    document TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS retained (
     key TEXT PRIMARY KEY,
     station TEXT NOT NULL REFERENCES station(key),
@@ -90,6 +98,7 @@ CREATE INDEX IF NOT EXISTS retained_station ON retained(station, created DESC);
 MAX_STATIONS = 250
 MAX_OBSERVATIONS_PER_STATION = 28
 MAX_MARKS_PER_OBSERVATION = 220
+MAX_OBSTRUCTION_PATCHES = 120
 MAX_LENS_REVISIONS = 80
 MAX_RECORDS_PER_STATION = 120
 MAX_ASSET_BYTES = 28 * 1024 * 1024
@@ -312,6 +321,34 @@ class Library:
                        (value, stamp, key))
             db.execute("UPDATE station SET updated=? WHERE key=?", (stamp, row["station"]))
             return self._photo(self._photo_row(db, key))
+
+    def obstruction(self, photo_key: str) -> dict:
+        with self.session() as db:
+            self._photo_row(db, photo_key)
+            row = db.execute("SELECT * FROM obstruction_layer WHERE photograph=?", (photo_key,)).fetchone()
+            if row is None:
+                return {"present": False, "layer": {"patches": []}, "revision": 0,
+                        "created_at": None, "updated_at": None}
+            return {"present": True, "layer": _decode(row["document"]),
+                    "revision": row["revision"], "created_at": row["created"], "updated_at": row["updated"]}
+
+    def save_obstruction(self, photo_key: str, revision: int, layer: ObstructionLayer) -> dict:
+        with self.session(write=True) as db:
+            photo = self._photo_row(db, photo_key)
+            self._match_revision(photo, revision, "observation")
+            stamp = utc_now()
+            existing = db.execute("SELECT * FROM obstruction_layer WHERE photograph=?", (photo_key,)).fetchone()
+            if existing is None:
+                db.execute("INSERT INTO obstruction_layer VALUES (?,?,?,?,?)",
+                           (photo_key, stamp, stamp, 1, _json(layer.public())))
+                saved_revision = 1
+            else:
+                db.execute("UPDATE obstruction_layer SET updated=?, revision=revision+1, document=? WHERE photograph=?",
+                           (stamp, _json(layer.public()), photo_key))
+                saved_revision = existing["revision"] + 1
+            db.execute("UPDATE station SET updated=? WHERE key=?", (stamp, photo["station"]))
+            return {"photo": self._photo(photo), "saved": self.obstruction(photo_key),
+                    "layer_revision": saved_revision, "saved_at": stamp}
 
     def lens_records(self, photo_key: str) -> dict:
         with self.session() as db:

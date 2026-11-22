@@ -10,8 +10,19 @@ const state = {
   prepared: null, editor: null, marks: [], noLive: false, busy: false,
   lensPane: null, lensDraft: null, colorDraft: null, chosenColor: null, chosenLens: null, asked: null,
   uploads: {}, folio: null, toolImage: null, loading: 0,
+  typing: null, typingDraft: null, typingPreview: null,
 };
 let noticeTimer = 0;
+
+const OBSTRUCTION_KINDS = {
+  foliage: {label: "Foliage and branches", color: [74, 132, 68]},
+  cloth: {label: "Temporary shade cloth", color: [176, 112, 58]},
+  unresolved: {label: "Cannot separate", color: [211, 178, 74]},
+};
+const kindRgb = (kind, alpha = 1) => {
+  const [r, g, b] = OBSTRUCTION_KINDS[kind].color;
+  return alpha >= 1 ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${alpha})`;
+};
 
 function h(value) {
   return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;")
@@ -188,7 +199,8 @@ async function station(id, keep = false) {
   if (!keep || id !== state.station?.id) {
     Object.assign(state, {focus: data.photos[0]?.id || null, selected: data.photos.slice(0, 1).map(photo => photo.id),
       tab: "inspect", tool: "open-share", settings: {}, orderSettings: null, prepared: null, editor: null,
-      lensPane: null, lensDraft: null, colorDraft: null, chosenColor: null, folio: null});
+      lensPane: null, lensDraft: null, colorDraft: null, chosenColor: null, folio: null,
+      typing: null, typingDraft: null, typingPreview: null});
     cleanResult();
   }
   Object.assign(state, data);
@@ -257,6 +269,31 @@ function rectangle(points) {
   return '<i class="marker-box" aria-hidden="true" style="' + css + '"></i>';
 }
 
+function polygonSvg(patch, index, selected) {
+  const points = patch.vertices.map(([x, y]) => (100 * x).toFixed(3) + "," + (100 * y).toFixed(3)).join(" ");
+  const tone = kindRgb(patch.kind);
+  const soft = kindRgb(patch.kind, .2);
+  const dots = patch.vertices.map(([x, y], i) =>
+    '<circle data-type-vertex="' + index + ":" + i + '" cx="' + (100 * x) + '" cy="' + (100 * y) +
+    '" r="1.05" fill="' + tone + '" stroke="#fffdf7" stroke-width=".32" vector-effect="non-scaling-stroke"/>').join("");
+  return '<polygon data-type-patch="' + index + '" points="' + points + '" fill="' + soft +
+    '" stroke="' + tone + '" stroke-width="2.4"' +
+    (selected ? ' stroke-dasharray="6 4"' : "") + ' stroke-linejoin="round" vector-effect="non-scaling-stroke"/>' + dots;
+}
+
+function typingOverlay() {
+  const draft = state.typingDraft;
+  if (!draft || state.lensPane?.mode !== "typing") return "";
+  const selected = state.typing?.selected;
+  const shapes = draft.patches.map((patch, index) => polygonSvg(patch, index, selected === index)).join("");
+  const drawing = state.editor?.kind === "polygon" ? state.editor.points.map(([x, y]) =>
+    '<circle cx="' + (100 * x) + '" cy="' + (100 * y) + '" r="1.1" fill="#fffdf7" stroke="' +
+    kindRgb(state.editor.key) + '" stroke-width="2" vector-effect="non-scaling-stroke"/>').join("") : "";
+  return '<svg class="type-layer' + (state.editor?.kind === "polygon" ? " is-drawing" : "") +
+    '" viewBox="0 0 100 100" preserveAspectRatio="none">' +
+    shapes + drawing + "</svg>";
+}
+
 function stage() {
   const picture = stageImage();
   const selected = reportAssets().filter(asset => asset.mime === "image/png");
@@ -265,9 +302,10 @@ function stage() {
       h(item.name) + '" aria-pressed="' + (item.name === state.activeAsset) + '">' + h(item.label) + "</button>").join("") + "</div>" : "";
   const controls = '<div class="row">' + (current() ? button("Camera", "source", "", "plain compact") : "") +
     (report()?.sources?.length > 1 ? button("Probe source " + (state.sourceIndex + 1) + "/" + report().sources.length, "cycle-source", "", "plain compact") : "") + "</div>";
-  const overlay = state.editor ? state.editor.points.map(point => dot(...point)).join("") +
+  const markerOverlay = state.editor && state.editor.kind !== "polygon" ? state.editor.points.map(point => dot(...point)).join("") +
     (state.editor.kind === "region" && state.editor.points.length === 2 ? rectangle(state.editor.points) : "") :
     state.probe?.visual ? dot(...state.probe.visual) : "";
+  const overlay = (state.lensPane?.mode === "typing" ? typingOverlay() : "") + markerOverlay;
   const helper = state.editor ? '<div class="stage-instruction"><span>' + h(state.editor.label) + '</span>' +
     button("Cancel", "draw-cancel", "", "plain compact") + '</div>' : "";
   let frame = '<div class="empty">Add an observation to open the image stage.</div>';
@@ -353,10 +391,11 @@ function footerHelp() {
 function preparation() {
   if (!current()) return '<p class="quiet">Add an observation to prepare its field geometry.</p>';
   const mode = state.lensPane?.mode || "lens";
-  const options = '<div class="row">' + [["lens","Lens"],["colors","Classify"],["marks","Field marks"]].map(([key, label]) =>
+  const options = '<div class="row">' + [["lens","Lens"],["colors","Classify"],["typing","Typing"],["marks","Field marks"]].map(([key, label]) =>
     button(label, "prepare-view", key, mode === key ? "primary compact" : "secondary compact")).join("") + "</div>";
   let body;
   if (mode === "colors") body = classifierPanel();
+  else if (mode === "typing") body = typingPanel();
   else if (mode === "marks") body = fieldPanel();
   else body = lensPanel();
   return options + '<div class="h-divider"></div>' + body + probeHTML();
@@ -386,6 +425,14 @@ async function choosePrepare(mode, keep = false) {
   } else if (mode === "colors") {
     if (!keep || !state.colorDraft) state.colorDraft = structuredClone(current().classification);
     state.chosenColor = null;
+    state.lensPane = {mode};
+  } else if (mode === "typing") {
+    const record = await rpc(photoPath() + "/obstruction");
+    if (state.focus !== selected) return;
+    state.typing = record;
+    state.typingDraft = structuredClone(record.layer);
+    state.typingPreview = null;
+    state.prepared = null;
     state.lensPane = {mode};
   } else if (mode === "marks") {
     const result = await rpc(photoPath() + "/marks");
@@ -438,6 +485,60 @@ function classifierPanel() {
     button("Retain reviewed colors", "save-color", "", "primary") + "</div>" : "";
   return '<h2>Sky color evidence</h2><p class="small">Mark a few known sky and obstruction patches on the original to check borderline colors.</p>' +
     form("color-preview", controls, "Preview classification") + prepared;
+}
+
+function typingPanel() {
+  const draft = state.typingDraft;
+  if (!draft) return '<p class="quiet">Open the image to begin typing obstructions.</p>';
+  const patchRows = draft.patches.map((patch, index) => {
+    const chosen = state.typing?.selected === index;
+    const swatch = '<i class="type-swatch" style="background:' + kindRgb(patch.kind) + '"></i>';
+    const kinds = Object.entries(OBSTRUCTION_KINDS).map(([key, info]) =>
+      '<option value="' + key + '"' + (key === patch.kind ? " selected" : "") + ">" + h(info.label) + "</option>").join("");
+    return '<div class="type-row' + (chosen ? " selected" : "") + '">' +
+      '<div class="type-head">' + swatch + "<strong>" + h(patch.label) + "</strong>" +
+      '<span class="quiet small">#' + (index + 1) + "</span></div>" +
+      '<label class="small">Class<select data-type-class="' + index + '">' + kinds + "</select></label>" +
+      '<div class="row">' + button("Show on photo", "type-locate", index, "secondary compact") +
+      button("Remove", "type-delete", index, "plain compact") + "</div></div>";
+  }).join("");
+  const stats = state.typingPreview?.stats?.summary;
+  const statsBlock = stats ? '<div class="source-evidence"><h3>Area record · native pixels</h3>' +
+    '<div class="measurements">' + Object.entries(stats.shares).map(([kind, row]) =>
+      '<div class="datum"><span><i class="type-swatch" style="background:' + kindRgb(kind) + '"></i>' +
+      h(row.label) + "</span><strong>" +
+      h(row.native_pixels.toLocaleString()) + " px · " + h(row.share_of_image_percent) + "%</strong></div>").join("") +
+    '<div class="datum"><span>Confirmed obstruction total (foliage + cloth)</span><strong>' +
+    h(stats.confirmed_obstruction_pixels.toLocaleString()) + " px · " + h(stats.confirmed_share_of_image_percent) + "%</strong></div>" +
+    '<div class="datum"><span>Unmarked supported pixels (left as seen, not claimed as sky)</span><strong>' +
+    h(stats.unmarked_supported_pixels.toLocaleString()) + " px</strong></div>" +
+    '<div class="datum"><span>Unsupported or hidden pixels</span><strong>' +
+    h(stats.unsupported_pixels.toLocaleString()) + " px · " + h(stats.unsupported_share_percent) + "%</strong></div>" +
+    "</div>" + (state.typingPreview.stats.warnings.map(w => '<p class="warn">' + h(w) + "</p>").join("")) +
+    typingDownloads() + "</div>" : "";
+  const drawButtons = Object.entries(OBSTRUCTION_KINDS).map(([key, info]) =>
+    button(info.label, "draw-type", key, "secondary compact")).join("");
+  const drawing = state.editor?.kind === "polygon" ? '<p class="small">Click vertices on the photo, then finish the polygon. ' +
+    button("Finish polygon", "type-finish", "", "secondary compact") + " " +
+    button("Cancel", "draw-cancel", "", "plain compact") + "</p>" : "";
+  const saved = state.typing?.present ? '<p class="small">Saved layer revision ' + state.typing.revision +
+    " · " + state.typing.updated_at.replace("T", " ").slice(0, 16) +
+    (state.typingPreview ? "" : " · preview again after editing") + "</p>" :
+    '<p class="quiet small">Nothing saved yet. Only what you confirm is recorded; grey edges can stay unresolved.</p>';
+  return '<h2>Obstruction typing</h2><p class="small">Confirm foliage and the temporary shade cloth directly on the original. ' +
+    "Grey edges that could follow the cloth seam or a branch stay in <strong>Cannot separate</strong>. Hidden pixels are never counted as sky.</p>" +
+    '<div class="row">' + drawButtons + "</div>" + drawing + saved +
+    form("type-preview", "", state.busy ? "Working…" : "Preview shares", {disabled: state.busy || Boolean(state.editor)}) +
+    (state.typingPreview ? '<div class="row">' + button("Retain typed layer", "type-save", "", "primary") + "</div>" : "") +
+    statsBlock +
+    (patchRows ? '<div class="h-divider"></div><h3>Patches in this layer (' + draft.patches.length + ")</h3><div class='detail-list'>" +
+      patchRows + "</div>" : '<p class="quiet small">No patches yet. Draw one around a region you can actually identify.</p>');
+}
+
+function typingDownloads() {
+  const files = [state.typingPreview?.csv_download, state.typingPreview?.json_download].filter(Boolean);
+  if (!files.length) return "";
+  return '<div class="row">' + files.map(asset => anchor(asset.label, assetSrc(asset), "download compact", true)).join("") + "</div>";
 }
 
 function fieldPanel() {
@@ -615,6 +716,69 @@ async function saveColors() {
   announce("Color samples retained.");
 }
 
+function invalidateTypingPreview() {
+  state.typingPreview = null;
+  state.prepared = null;
+}
+
+function polygonArea(points) {
+  let total = 0;
+  for (let i = 0; i < points.length; i += 1) {
+    const [ax, ay] = points[i];
+    const [bx, by] = points[(i + 1) % points.length];
+    total += ax * by - bx * ay;
+  }
+  return Math.abs(total) / 2;
+}
+
+function finishPolygon() {
+  const edit = state.editor;
+  if (!edit || edit.kind !== "polygon") return;
+  const vertices = edit.points.map(([x, y]) => [Number(x.toFixed(6)), Number(y.toFixed(6))]);
+  if (vertices.length < 3) throw Error("A patch needs at least three vertices.");
+  if (polygonArea(vertices) < 0.000035) throw Error("Enclose a larger area; tiny patches cannot be confirmed.");
+  const sameKind = state.typingDraft.patches.filter(patch => patch.kind === edit.key).length;
+  state.typingDraft.patches.push({
+    label: OBSTRUCTION_KINDS[edit.key].label + " " + (sameKind + 1),
+    kind: edit.key, vertices, note: "",
+  });
+  state.editor = null;
+  invalidateTypingPreview();
+  render();
+}
+
+async function typingPreviewRequest(retain = false) {
+  if (state.editor) throw Error("Finish or cancel the polygon in progress first.");
+  if (state.busy || !state.focus) return;
+  state.busy = true;
+  render();
+  try {
+    const payload = {revision: current().revision, layer: state.typingDraft, retain};
+    if (retain && state.typingPreview?.fingerprint) payload.expected = state.typingPreview.fingerprint;
+    const data = await rpc(photoPath() + "/obstruction/preview", "POST", payload);
+    state.typingPreview = data;
+    if (retain) {
+      state.typing = data.saved;
+      state.typingDraft = structuredClone(data.saved.layer);
+      await station(state.station.id, true);
+      await choosePrepare("typing", true);
+      state.typingPreview = data;
+      announce("Typed obstruction layer retained.");
+    } else {
+      render();
+      announce("Obstruction shares preview ready.");
+    }
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+async function saveTyping() {
+  if (!state.typingPreview?.fingerprint) throw Error("Preview the layer before retaining it.");
+  await typingPreviewRequest(true);
+}
+
 function enterDraw(kind, label, key = "") {
   state.probe = null;
   state.editor = {kind, key, label, points: []};
@@ -625,6 +789,7 @@ function handleDraw(uv) {
   const edit = state.editor;
   if (!edit) return;
   edit.points.push(uv);
+  if (edit.kind === "polygon") { render(); return; }
   if (["line", "region"].includes(edit.kind) && edit.points.length === 1) {render(); return;}
   state.editor = null;
   if (edit.kind === "center") {
@@ -696,6 +861,14 @@ async function probeRequest(point, space, context, screen = null) {
 }
 
 async function plateEvent(event) {
+  const shape = event.target.closest("[data-type-patch], [data-type-vertex]");
+  if (shape && state.lensPane?.mode === "typing" && !state.editor) {
+    const index = Number((shape.dataset.typePatch ?? shape.dataset.typeVertex.split(":")[0]));
+    state.typing.selected = index;
+    state.prepared = null;
+    render();
+    return true;
+  }
   const image = event.target.closest("#stage-image");
   if (!image) return false;
   const plate = image.closest("#plate");
@@ -822,6 +995,28 @@ const actions = {
   "draw-landmark": () => { state.lensDraft = lensInput(); enterDraw("landmark", "Click the position corresponding to your surveyed landmark."); },
   "draw-region": (key) => { state.colorDraft = colorInput(); enterDraw("region", "Pick opposite corners for the " + title(key) + " sample.", key); },
   "draw-mark": () => enterDraw("mark", "Select the observed camera position."),
+  "draw-type": (kind) => {
+    if (state.typingDraft.patches.length >= (state.budget.obstruction_patches_per_observation ?? 120))
+      throw Error("This observation has reached its obstruction patch budget.");
+    enterDraw("polygon", "Click each vertex of the " + OBSTRUCTION_KINDS[kind].label.toLowerCase() +
+      " region, then finish the polygon.", kind);
+  },
+  "type-finish": finishPolygon,
+  "type-delete": (index) => {
+    const removed = Number(index);
+    state.typingDraft.patches.splice(removed, 1);
+    const chosen = state.typing.selected;
+    if (chosen === removed) state.typing.selected = null;
+    else if (chosen != null && chosen > removed) state.typing.selected = chosen - 1;
+    invalidateTypingPreview();
+    render();
+  },
+  "type-locate": (index) => {
+    state.typing.selected = Number(index);
+    state.prepared = null;
+    render();
+  },
+  "type-save": saveTyping,
   "direction-mark": () => markDialog(),
   "draw-cancel": () => { state.editor = null; render(); },
   "lens-picture": (key) => { state.prepared = state.chosenLens.assets.find(asset => asset.name === key); state.probe = null; render(); },
@@ -928,6 +1123,7 @@ const submissions = {
   "inspection": run,
   "lens-preview": lensTest,
   "color-preview": classifyTest,
+  "type-preview": () => typingPreviewRequest(false),
   "survey-landmark": async (fd) => {
     state.lensDraft.marks.push({title: fd.get("title"), direction: [asNumber(fd, "bearing"), asNumber(fd, "elevation")],
       confidence: asNumber(fd, "confidence"), image: state.pendingPoint});
@@ -1018,6 +1214,10 @@ document.body.addEventListener("submit", (event) => {
   safely(() => submissions[form.dataset.form](new FormData(form)));
 });
 
+document.body.addEventListener("dblclick", (event) => safely(async () => {
+  if (state.editor?.kind === "polygon" && event.target.closest("#plate")) finishPolygon();
+}));
+
 main.addEventListener("change", (event) => safely(async () => {
   const target = event.target;
   if (target.id === "tool-select") {
@@ -1027,6 +1227,15 @@ main.addEventListener("change", (event) => safely(async () => {
     state.prepared = null;
     cleanResult();
     render();
+  }
+  if (target.dataset.typeClass != null) {
+    const index = Number(target.dataset.typeClass);
+    const patch = state.typingDraft?.patches[index];
+    if (patch && patch.kind !== target.value) {
+      patch.kind = target.value;
+      invalidateTypingPreview();
+      render();
+    }
   }
   const id = target.dataset.check;
   if (!id) return;
