@@ -17,14 +17,14 @@ from .archive import MAX_PACKET_COMPRESSED, build_packet, render_sheet, verify_p
 from .bench import ANALYSIS_VERSION, Bench, Capacity, Order, Source
 from .calibration import fit_lens, lens_limits
 from .camera import FORMATS, MAX_FILE_BYTES, MAX_PIXELS, Camera, encode_png, safe_download_label
-from .contracts import (Capture, Mark, Problem, Station, boolean, enum, fields, filename, identifier,
-                        items, key_of, mapping, point, real, text, whole)
+from .contracts import (Capture, Footprint, Mark, Problem, Station, angle, boolean, enum, fields, filename,
+                        identifier, items, key_of, mapping, point, real, text, whole)
 from .demo import EXAMPLES, populate, render_observation
 from .field import direction_readout, image_readout, native_witness
 from .folio import contact_sheet, folio_csv, folio_name, make_folio, render_folio
 from .library import MAX_MARKS_PER_OBSERVATION, MAX_OBSERVATIONS_PER_STATION, MAX_RECORDS_PER_STATION, Library
 from .mark_exchange import MAX_NOTE_BYTES, field_log, import_log
-from .projection import Lens
+from .projection import Grid, Lens
 from .packet_reader import evidence_receipt_image, inspect_packet
 from .result import Asset
 from .sky import Classifier, Controls, native_classes
@@ -92,6 +92,26 @@ def _retained_source(library: Library, source: dict) -> Source:
     if source.get("lens_id") is not None:
         lens = {"id": source["lens_id"], "lens": source["lens"], "title": source["lens_title"]}
     return Source.from_stored(photo, lens, library.source_blob(source))
+
+
+def _combined_retained_bench(library: Library, record: dict):
+    """Rebuild the two verified sources and direction grid of a retained merge."""
+    sources = [_retained_source(library, entry) for entry in record["sources"]]
+    if len(sources) != 2:
+        raise Problem("A combined view needs its two retained captures.")
+    order = record["order"]
+    footprint = Footprint.parse(order.get("footprint"))
+    columns, rows = order.get("grid", [160, 66])
+    grid = Grid.create(footprint, columns, rows)
+    choices = order.get("settings", {}).get("conflict_choices", [])
+    return sources, grid, choices
+
+
+def _combined_adopted_index(library: Library, record: dict, direction: tuple[float, float]) -> tuple[int, dict]:
+    from .merge import adopted_source_for_direction
+    sources, grid, choices = _combined_retained_bench(library, record)
+    lookup = adopted_source_for_direction(grid, sources[0], sources[1], choices, direction)
+    return lookup["source_index"], lookup
 
 
 def register_library(app: Flask, library: Library, executor: Capacity):
@@ -364,6 +384,31 @@ def register_analysis(app: Flask, library: Library, executor: Capacity):
             position = whole(data.get("source_index", 0), "Retained source", 0, len(record["sources"]) - 1)
             source = _retained_source(library, record["sources"][position])
             return _probe_result(source, data)
+
+    @app.post("/api/retained/<key>/combined-probe")
+    def combined_probe(key):
+        """Read a merged direction through the exact capture adopted for it."""
+        data = _request()
+        fields(data, "space", "positions", "radius", "witness")
+        if data.get("space") != "direction":
+            raise Problem("The combined view is probed by bearing and elevation.")
+        with executor:
+            record = library.retained(key)
+            if record.get("tool") != "combined-view":
+                raise Problem("Open a retained combined canopy view to use this probe.", 409)
+            positions = [angle(value) for value in items(data.get("positions"), "Directions", 1, 1)]
+            adopted_index, lookup = _combined_adopted_index(library, record, positions[0])
+            sources, _, _ = _combined_retained_bench(library, record)
+            source = sources[adopted_index]
+            result = _probe_result(source, data)
+            result["adopted_source_index"] = adopted_index
+            result["other_source_index"] = 1 - adopted_index
+            result["provenance"] = lookup["provenance"]
+            result["merged_class"] = lookup["merged_class"]
+            result["provenance_note"] = (
+                "This direction was adopted from " + source.title +
+                ". Switch the probe source to inspect the opposite capture.")
+            return result
 
     @app.post("/api/stations/<station>/perspective-probe")
     def view_probe(station):

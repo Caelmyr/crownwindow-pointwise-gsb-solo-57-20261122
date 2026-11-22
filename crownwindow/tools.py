@@ -11,6 +11,7 @@ from .concordance import DEMO_TIES, compare_ties
 from .coverage import angular_share, classify_photo, horizon_line, inspect_geometry, inspect_source, line_profile
 from .field import field_overlay
 from .lighting import diffuse_reference, refind_change
+from .merge import combined_view
 from .optics import DEMO_BRIGHTNESS, DEMO_OPTIC_MARKS, lens_model_audit, relative_light_audit
 from .patches import native_window
 from .planes import DEMO_PLANES, oriented_surfaces
@@ -107,6 +108,10 @@ TOOLS = {value.id: value for value in (
     Tool("paired-change", "Repeat survey change", "Fieldwork", 2, (
         number("difference_floor", "Luminance change indicator", .08, .005),
     ), "Look for open-to-obstructed changes in matched directions on two repeat photographs.", refind_change, True),
+    Tool("combined-view", "Combined canopy view", "Canopy", 2, (
+        structured("conflict_choices", "Capture chosen per disagreement patch", [],
+                   "Each entry is {\"patch\": rank, \"source\": capture id}. Leave blank to preview first-capture defaults."),
+    ), "Merge two partly blocked captures into one direction map, count shared directions once, and pick a capture for each wind-moved patch.", combined_view, True),
     Tool("direction-transect", "Direction transect", "Fieldwork", 1, (
         structured("from_direction", "Start bearing, elevation", [2, 10], shape="pair"),
         structured("to_direction", "End bearing, elevation", [85, 60], shape="pair"),

@@ -215,7 +215,8 @@ function captureRail() {
 }
 
 const ANGULAR_RESULTS = new Set(["open-class-map.png","lens-support.png","sky-windows.png","weighted-sky.png",
-  "camera-luminance.png","sky-basis.png","observed-change.png","brightness-difference.png"]);
+  "camera-luminance.png","sky-basis.png","observed-change.png","brightness-difference.png",
+  "combined-sky-map.png","source-provenance.png","conflict-review.png","combined-photo.png"]);
 const NATIVE_RESULTS = new Set(["camera-display.png","camera-clipping.png","line-on-source.png","lens-on-photo.png",
   "class-overlay.png","class-margin.png","path-on-source.png","angular-transect.png","field-on-camera.png",
   "native-detail.png","validation-patches.png","trial-colors.png","lens-on-source.png","landmark-residuals.png"]);
@@ -286,7 +287,12 @@ function optionField(fieldSpec) {
   else if (kind === "checkbox") control = checked(label, key, value);
   else if (kind === "pair") control = field(label, key, JSON.stringify(value), "required");
   else if (kind === "line") control = field(label, key, JSON.stringify(value), "required") + button("Mark two endpoints", "draw-line", key, "secondary compact");
-  else control = jsonArea(label, key, value, 4);
+  else if (key === "conflict_choices") {
+    const count = Array.isArray(value) ? value.length : 0;
+    control = '<label>' + h(label) + '<input name="' + h(key) + '" value=\'' + h(JSON.stringify(value)) +
+      "' readonly><small>" + (count ? count + " patch choice(s) recorded; use the patch buttons below to change them."
+      : "No patch choices yet. Run the view, then choose a frame per disagreement patch.") + "</small></label>";
+  } else control = jsonArea(label, key, value, 4);
   if (state.tool === "sun-path" && key === "landmarks") {
     control += '<div class="row">' + button("Import directions CSV", "path-csv", "", "secondary compact") +
       anchor("Example CSV", "/api/paths/example.csv", "download compact", true) + "</div>";
@@ -314,7 +320,40 @@ function inspectPane() {
   const criteria = (tool.footprint ? footprintEditor() : "") + tool.settings.map(optionField).join("");
   return '<div class="settings">' + settings + (needs ? '<p class="quiet">Tick two source observations to compare.</p>' : "") +
     form("inspection", criteria, state.busy ? "Working…" : "Run inspection", {disabled: state.busy || !current() || needs}) +
-    "</div>" + resultHTML() + probeHTML();
+    "</div>" + resultHTML() + conflictHTML() + probeHTML();
+}
+
+function conflictHTML() {
+  const value = report();
+  if (!value || value.tool !== "combined-view" || !value.readings?.length) return "";
+  const locked = Boolean(value.id);
+  const first = value.metrics.first_capture_id;
+  const second = value.metrics.second_capture_id;
+  const current = new Set((value.order.settings.conflict_choices || []).map(row => row.patch + ":" + row.source));
+  const rows = value.readings.slice(0, 60).map(row => {
+    const firstKey = row.patch + ":" + first;
+    const secondKey = row.patch + ":" + second;
+    const chooseFirst = current.has(firstKey) || (!current.has(secondKey) && row.chosen_source === "first");
+    const chooseSecond = current.has(secondKey) || (!current.has(firstKey) && row.chosen_source === "second");
+    const frameButtons = locked
+      ? '<span class="pill">' + (chooseFirst ? "Adopted Frame 1" : "Adopted Frame 2") + "</span>"
+      : button("Frame 1", "conflict-pick", row.patch + ":" + first, chooseFirst ? "primary compact" : "secondary compact") +
+        button("Frame 2", "conflict-pick", row.patch + ":" + second, chooseSecond ? "primary compact" : "secondary compact");
+    return '<div class="conflict-row"><strong>Patch ' + h(row.patch) + ' · ' + h(row.cells) + ' cells</strong>' +
+      '<small>' + h(row.center_bearing) + '°, ' + h(row.center_elevation) + '° · ' +
+      h(row.first_capture_class) + ' vs ' + h(row.second_capture_class) + '</small><div class="row">' +
+      frameButtons + '</div></div>';
+  }).join("");
+  const unresolved = value.readings.filter(row =>
+    !(value.order.settings.conflict_choices || []).some(choice => choice.patch === row.patch)).length;
+  const intro = locked
+    ? "These capture choices are fixed in the retained record. Click the maps to read each adopted original."
+    : "Both frames saw these directions differently (wind movement). Pick which frame supplies each patch; the combined sky share recalculates when you rerun.";
+  return '<section class="source-evidence"><h3>Disagreement patches</h3>' +
+    '<p class="small">' + h(intro) + '</p>' +
+    (!locked && unresolved ? '<p class="warn">' + unresolved + ' patch(es) still use Frame 1 by default.</p>' :
+      '<p class="tag">Every patch has an explicit choice.</p>') +
+    '<div class="detail-list">' + rows + "</div></section>";
 }
 
 function resultHTML() {
@@ -341,8 +380,12 @@ function probeHTML() {
   if (!data) return "";
   const reading = data.results.readings[0];
   const witness = data.results.witness ? '<img class="image-data" alt="Magnified source pixels" src="' + h(assetSrc(data.results.witness)) + '">' : "";
-  return '<section class="source-evidence"><h3>Point evidence</h3>' + metrics({
-    class: reading.class, direction: reading.direction, camera_pixel: reading.pixel || reading.camera_px, rgb: reading.rgb
+  const note = data.results.provenance_note ? '<p class="warn">' + h(data.results.provenance_note) +
+    (data.results.other_source_index !== undefined ?
+      ' ' + button("Inspect the opposite capture", "cycle-source", "", "secondary compact") : "") + "</p>" : "";
+  return '<section class="source-evidence"><h3>Point evidence</h3>' + note + metrics({
+    class: reading.class, direction: reading.direction, camera_pixel: reading.pixel || reading.camera_px,
+    rgb: reading.rgb, provenance: data.results.provenance
   }) + witness + fold("Exact point readout", reading) + "</section>";
 }
 
@@ -460,7 +503,7 @@ function recordsPane() {
     "</small></div>").join("");
   return '<h2>Station records</h2>' + toolbar +
     (options ? '<div class="detail-list">' + options + '</div>' : '<p class="quiet small">Run an inspection and retain it to have its numbers and source basis here.</p>') +
-    resultHTML() + probeHTML();
+    resultHTML() + conflictHTML() + probeHTML();
 }
 
 function panel() {
@@ -510,6 +553,7 @@ function rememberInspection() {
   for (const option of definition().settings) {
     if (option.kind === "checkbox") settings[option.key] = fields.has(option.key);
     else if (option.kind === "number") settings[option.key] = asNumber(fields, option.key);
+    else if (option.key === "conflict_choices") settings[option.key] = state.settings.conflict_choices ?? option.default;
     else settings[option.key] = readJson(fields, option.key);
   }
   const footprint = definition().footprint ? {
@@ -682,7 +726,9 @@ async function probeRequest(point, space, context, screen = null) {
   const archived = activeReport?.id;
   let uri = photoPath() + "/probe";
   const body = {space, positions: [point], radius: 7, witness: true};
-  if (context === "retained" && archived) {
+  if (context === "retained" && archived && activeReport.tool === "combined-view") {
+    uri = "/api/retained/" + activeReport.id + "/combined-probe";
+  } else if (context === "retained" && archived) {
     uri = "/api/retained/" + activeReport.id + "/probe";
     body.source_index = state.sourceIndex;
   } else if (context === "retained" && activeReport?.sources?.length) {
@@ -691,6 +737,7 @@ async function probeRequest(point, space, context, screen = null) {
     body.lens = source.lens_id;
   }
   const results = await rpc(uri, "POST", body);
+  if (results.adopted_source_index !== undefined) state.sourceIndex = results.adopted_source_index;
   state.probe = {results, visual: screen};
   render();
 }
@@ -817,6 +864,16 @@ const actions = {
     render();
   },
   "prepare-view": (view) => choosePrepare(view),
+  "conflict-pick": async (value) => {
+    const [patchText, source] = value.split(":");
+    const patch = Number(patchText);
+    rememberInspection();
+    const choices = Array.isArray(state.settings.conflict_choices) ? state.settings.conflict_choices : [];
+    state.settings.conflict_choices = choices.filter(row => row.patch !== patch);
+    state.settings.conflict_choices.push({patch, source});
+    await run();
+    announce("Patch " + patch + " assigned; the combined view was recalculated.");
+  },
   "draw-line": (key) => { rememberInspection(); enterDraw("line", "Mark the two endpoints on the original camera image.", key); },
   "draw-center": () => { state.lensDraft = lensInput(); enterDraw("center", "Mark the center of the lens circle."); },
   "draw-landmark": () => { state.lensDraft = lensInput(); enterDraw("landmark", "Click the position corresponding to your surveyed landmark."); },

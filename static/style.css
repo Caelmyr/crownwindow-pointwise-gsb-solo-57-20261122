@@ -129,6 +129,8 @@ th,td{padding:6px 6px;white-space:nowrap;border-bottom:1px solid #d9ddcf;text-al
 .detail-list{display:grid;gap:8px;margin:8px 0}
 .revision,.record-row,.mark-row{display:grid;gap:6px;border:1px solid var(--line);border-radius:5px;padding:8px}
 .record-row button{text-align:left;justify-content:flex-start}
+.conflict-row{display:grid;gap:6px;border:1px solid #d4d2bd;border-radius:5px;padding:9px;background:#fbf7ea}
+.conflict-row small{color:var(--soft);font-size:.77rem}
 .source-evidence{background:#f5f7eb;border:1px solid var(--line);margin-top:9px;border-radius:5px;padding:10px;display:grid;gap:7px}
 .image-data{width:100%;display:block;border-radius:4px}
 .lab-note{font-size:.79rem;color:var(--soft);padding:8px 0}
