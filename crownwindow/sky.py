@@ -233,6 +233,12 @@ def sample_directions(camera: Camera, lens: Lens, classifier: Classifier,
     points, geometry = lens.world_to_image(directions, camera)
     value, native_support = camera.bilinear(points)
     codes, score = classifier.classify(value, geometry & native_support, points)
+    withheld = lens.withheld(directions)
+    if np.any(withheld):
+        codes = codes.copy()
+        codes[withheld] = MISSING
+        score = score.copy()
+        score[withheld] = np.nan
     return DirectionSamples(directions, points, value, codes, score)
 
 

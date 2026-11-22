@@ -9,6 +9,7 @@ const state = {
   settings: {}, orderSettings: null, image: null, activeAsset: null, probe: null, sourceIndex: 0,
   prepared: null, editor: null, marks: [], noLive: false, busy: false,
   lensPane: null, lensDraft: null, colorDraft: null, chosenColor: null, chosenLens: null, asked: null,
+  levelDraft: null, chosenLeveling: null, levelSelection: null,
   uploads: {}, folio: null, toolImage: null, loading: 0,
 };
 let noticeTimer = 0;
@@ -188,7 +189,8 @@ async function station(id, keep = false) {
   if (!keep || id !== state.station?.id) {
     Object.assign(state, {focus: data.photos[0]?.id || null, selected: data.photos.slice(0, 1).map(photo => photo.id),
       tab: "inspect", tool: "open-share", settings: {}, orderSettings: null, prepared: null, editor: null,
-      lensPane: null, lensDraft: null, colorDraft: null, chosenColor: null, folio: null});
+      lensPane: null, lensDraft: null, colorDraft: null, chosenColor: null, folio: null,
+      levelDraft: null, chosenLeveling: null, levelSelection: null});
     cleanResult();
   }
   Object.assign(state, data);
@@ -215,10 +217,11 @@ function captureRail() {
 }
 
 const ANGULAR_RESULTS = new Set(["open-class-map.png","lens-support.png","sky-windows.png","weighted-sky.png",
-  "camera-luminance.png","sky-basis.png","observed-change.png","brightness-difference.png"]);
+  "camera-luminance.png","sky-basis.png","observed-change.png","brightness-difference.png","leveling-agreement.png"]);
 const NATIVE_RESULTS = new Set(["camera-display.png","camera-clipping.png","line-on-source.png","lens-on-photo.png",
   "class-overlay.png","class-margin.png","path-on-source.png","angular-transect.png","field-on-camera.png",
-  "native-detail.png","validation-patches.png","trial-colors.png","lens-on-source.png","landmark-residuals.png"]);
+  "native-detail.png","validation-patches.png","trial-colors.png","lens-on-source.png","landmark-residuals.png",
+  "leveling-placement.png","leveling-on-source.png"]);
 
 function reportAssets() {
   const result = report();
@@ -353,11 +356,12 @@ function footerHelp() {
 function preparation() {
   if (!current()) return '<p class="quiet">Add an observation to prepare its field geometry.</p>';
   const mode = state.lensPane?.mode || "lens";
-  const options = '<div class="row">' + [["lens","Lens"],["colors","Classify"],["marks","Field marks"]].map(([key, label]) =>
+  const options = '<div class="row">' + [["lens","Lens"],["leveling","Level tilt"],["colors","Classify"],["marks","Field marks"]].map(([key, label]) =>
     button(label, "prepare-view", key, mode === key ? "primary compact" : "secondary compact")).join("") + "</div>";
   let body;
   if (mode === "colors") body = classifierPanel();
   else if (mode === "marks") body = fieldPanel();
+  else if (mode === "leveling") body = levelingPanel();
   else body = lensPanel();
   return options + '<div class="h-divider"></div>' + body + probeHTML();
 }
@@ -386,6 +390,14 @@ async function choosePrepare(mode, keep = false) {
   } else if (mode === "colors") {
     if (!keep || !state.colorDraft) state.colorDraft = structuredClone(current().classification);
     state.chosenColor = null;
+    state.lensPane = {mode};
+  } else if (mode === "leveling") {
+    if (!keep || !state.levelDraft) {
+      const revisions = await rpc(photoPath() + "/lens");
+      const base = revisions.versions.find(item => item.id === revisions.active)?.lens || defaultLens();
+      state.levelDraft = {lens: structuredClone(base), marks: [], threshold: 2.5};
+    }
+    state.chosenLeveling = null;
     state.lensPane = {mode};
   } else if (mode === "marks") {
     const result = await rpc(photoPath() + "/marks");
@@ -416,13 +428,62 @@ function lensPanel() {
     (state.chosenLens.fit.residuals ? fold("Landmark residuals", state.chosenLens.fit.residuals, true) : "") +
     '<div class="row">' + state.chosenLens.assets.map(asset => button(asset.label, "lens-picture", asset.name, "secondary compact")).join("") +
     '</div>' + button("Retain reviewed lens", "save-lens", "", "primary") + "</div>" : "";
-  const versions = (state.lensPane?.versions || []).map(record => '<div class="revision"><strong>' + h(record.title) + '</strong><small>Version ' +
-    record.ordinal + " · " + h(record.lens.model) + '</small>' +
-    (record.id === state.lensPane.active ? '<span class="tag">Active lens</span>' : button("Activate version", "activate-lens", record.id, "secondary compact")) +
-    "</div>").join("");
+  const versions = (state.lensPane?.versions || []).map(record => {
+    const tilt = record.lens.lean?.tilt_degrees || 0;
+    const held = record.lens.holdout ? " · belt withheld" : "";
+    const badge = tilt ? '<span class="tag">Tilt ' + h(tilt) + "°" + held + "</span>" :
+      '<span class="tag">Level axis' + held + "</span>";
+    return '<div class="revision"><strong>' + h(record.title) + '</strong><small>Version ' +
+      record.ordinal + " · " + h(record.lens.model) + '</small>' + badge +
+      (record.id === state.lensPane.active ? '<span class="tag">Active lens</span>' : button("Activate version", "activate-lens", record.id, "secondary compact")) +
+      "</div>";
+  }).join("");
   return '<h2>Lens placement</h2><p class="small">Use a level lens circle and a known compass direction. Preview the geometry before keeping a version.</p>' +
     form("lens-preview", settings, "Preview lens") + preview +
     (versions ? '<div class="h-divider"></div><h3>Lens history</h3><div class="detail-list">' + versions + "</div>" : "");
+}
+
+function levelingPanel() {
+  const draft = state.levelDraft || {lens: defaultLens(), marks: [], threshold: 2.5};
+  const base = draft.lens;
+  const intro = '<h2>Level a tilted capture</h2><p class="small">Keep the previously measured circle for the fixed placement, or let the ' +
+    "adjusted placement move it slightly. Mark the corners whose bearing and elevation you know, then compare where both placements stand. " +
+    "The disputed belt stays withheld from the sky share until more sides are surveyed.</p>";
+  const baseCard = '<div class="detail-list"><div class="revision"><strong>Base circle</strong><small>' +
+    h(base.model) + " · radius " + h(base.radius_over_short_side) + " · north " + h(base.north_clockwise) + "°</small></div></div>";
+  const formBody = baseCard +
+    numberField("Disagreement threshold (°)", "level-threshold", draft.threshold, .1, "min=.1 max=12 required") +
+    "<details open><summary>Surveyed corners on this photo</summary>" + jsonArea("Corner marks", "level-marks", draft.marks, 6) +
+    '<div class="row">' + button("Pick a corner", "draw-level-landmark", "", "secondary compact") + "</div></details>";
+  const preview = state.chosenLeveling ? levelingEvidence(state.chosenLeveling) : "";
+  return intro + form("leveling-preview", formBody, "Compare both placements") + preview;
+}
+
+function levelingEvidence(data) {
+  const fitCards = data.fits.map(fit => '<div class="revision"><strong>' + (fit.mode === "fixed_circle" ?
+    "Fixed measured circle" : "Circle adjusted to corners") + '</strong><small>tilt ' +
+    h(fit.lens.lean.tilt_degrees) + "° toward bearing " + h(fit.lens.lean.tilt_bearing) + "° · north " +
+    h(fit.lens.north_clockwise) + "° · RMS " + h(fit.fit.metrics.rms_px) + " px</small>" +
+    button("Use this placement", "level-choose", fit.mode, "secondary compact") +
+    (fit.warnings.length ? '<p class="warn small">' + fit.warnings.map(h).join("<br>") + "</p>" : "") + "</div>").join("");
+  const pictures = '<div class="row">' + data.assets.map(asset =>
+    button(asset.label, "level-picture", asset.name, "secondary compact")).join("") + "</div>";
+  const retain = state.levelSelection ? levelingRetainForm(data) :
+    '<p class="quiet small">Choose a placement above, then decide which belt to withhold before retaining.</p>';
+  return '<div class="h-divider"></div><div class="source-evidence"><h3>Two leveled placements</h3>' + metrics(data.summary) +
+    pictures + '<div class="detail-list">' + fitCards + "</div>" +
+    fold("Sector agreement table", data.sectors, true) + retain + "</div>";
+}
+
+function levelingRetainForm(data) {
+  const fit = data.fits.find(entry => entry.mode === state.levelSelection);
+  const holdoutChoices = data.holdouts && data.summary && data.summary.reason === undefined ?
+    [["disputed", "Withhold only the disputed belt"], ["cautious", "Withhold every non-concordant belt"],
+     ["none", "Keep the full circle (no holdout)"]] :
+    [["none", "Keep the full circle (no holdout)"]];
+  return '<h3>Retain ' + (fit.mode === "fixed_circle" ? "fixed-circle" : "adjusted-circle") + ' placement</h3>' +
+    form("leveling-retain", field("Leveled lens title", "level-title", "Leveled field geometry", "required maxlength=78") +
+      drop("Withheld belt", "level-holdout", holdoutChoices, holdoutChoices[0][0]), "Retain reviewed leveled lens");
 }
 
 function classifierPanel() {
@@ -566,6 +627,53 @@ function lensInput() {
   };
 }
 
+function levelingInput() {
+  const candidate = el('form[data-form="leveling-preview"]');
+  if (!candidate || !state.levelDraft) return state.levelDraft;
+  const fd = new FormData(candidate);
+  return {
+    lens: state.levelDraft.lens,
+    threshold: asNumber(fd, "level-threshold"),
+    marks: readJson(fd, "level-marks"),
+  };
+}
+
+async function levelingPreview() {
+  state.levelDraft = levelingInput();
+  const response = await rpc(photoPath() + "/leveling", {
+    revision: current().revision, lens: state.levelDraft.lens,
+    marks: state.levelDraft.marks, threshold: state.levelDraft.threshold,
+  }, "POST");
+  state.chosenLeveling = response;
+  state.levelSelection = null;
+  state.prepared = response.assets[0];
+  render();
+  announce("Both leveled placements are ready.");
+}
+
+async function levelingRetain(fd) {
+  if (!state.chosenLeveling || !state.levelSelection) throw Error("Compare the placements and choose one first.");
+  const mode = state.levelSelection;
+  const placements = state.chosenLeveling.fits.map(entry => entry.mode);
+  const fit = state.chosenLeveling.fits.find(entry => entry.mode === mode);
+  const holdout = fd.get("level-holdout");
+  const title = fd.get("level-title");
+  const holdoutData = holdout === "none" ? null : state.chosenLeveling.holdouts[holdout];
+  const common = {
+    revision: current().revision, title, mode, holdout, holdout_data: holdoutData,
+    lens: fit.lens, placements, fingerprint: state.chosenLeveling.fingerprint,
+  };
+  const preview = await rpc(photoPath() + "/leveling/retain", {...common, retain: false, expected: ""}, "POST");
+  const saved = await rpc(photoPath() + "/leveling/retain",
+    {...common, retain: true, expected: preview.fingerprint}, "POST");
+  dialog.close();
+  await station(state.station.id, true);
+  await choosePrepare("leveling", true);
+  state.prepared = saved.assets[0];
+  render();
+  announce("Leveled lens retained. Activate any earlier level version from the Lens history.");
+}
+
 function colorInput() {
   const formNode = el('form[data-form="color-preview"]');
   if (!formNode) return state.colorDraft;
@@ -644,7 +752,7 @@ function handleDraw(uv) {
     state.prepared = null;
   }
   render();
-  if (edit.kind === "landmark") landmarkDialog(uv);
+  if (edit.kind === "landmark" || edit.kind === "level-landmark") landmarkDialog(uv);
   if (edit.kind === "mark") markDialog(uv);
 }
 
@@ -820,6 +928,13 @@ const actions = {
   "draw-line": (key) => { rememberInspection(); enterDraw("line", "Mark the two endpoints on the original camera image.", key); },
   "draw-center": () => { state.lensDraft = lensInput(); enterDraw("center", "Mark the center of the lens circle."); },
   "draw-landmark": () => { state.lensDraft = lensInput(); enterDraw("landmark", "Click the position corresponding to your surveyed landmark."); },
+  "draw-level-landmark": () => { state.levelDraft = levelingInput(); enterDraw("level-landmark", "Click the corner whose bearing and elevation you know."); },
+  "level-picture": (key) => { state.prepared = state.chosenLeveling.assets.find(asset => asset.name === key); state.probe = null; render(); },
+  "level-choose": (mode) => {
+    state.levelSelection = mode;
+    state.prepared = state.chosenLeveling.assets[0];
+    render();
+  },
   "draw-region": (key) => { state.colorDraft = colorInput(); enterDraw("region", "Pick opposite corners for the " + title(key) + " sample.", key); },
   "draw-mark": () => enterDraw("mark", "Select the observed camera position."),
   "direction-mark": () => markDialog(),
@@ -929,14 +1044,24 @@ const submissions = {
   "lens-preview": lensTest,
   "color-preview": classifyTest,
   "survey-landmark": async (fd) => {
-    state.lensDraft.marks.push({title: fd.get("title"), direction: [asNumber(fd, "bearing"), asNumber(fd, "elevation")],
-      confidence: asNumber(fd, "confidence"), image: state.pendingPoint});
-    state.chosenLens = null;
+    const mark = {title: fd.get("title"), direction: [asNumber(fd, "bearing"), asNumber(fd, "elevation")],
+      confidence: asNumber(fd, "confidence"), image: state.pendingPoint};
+    if (state.editor?.kind === "level-landmark" || state.lensPane?.mode === "leveling") {
+      state.levelDraft.marks.push(mark);
+      state.chosenLeveling = null;
+      state.levelSelection = null;
+    } else {
+      state.lensDraft.marks.push(mark);
+      state.chosenLens = null;
+    }
     state.prepared = null;
     dialog.close();
     render();
-    el('form[data-form="lens-preview"] details').open = true;
+    const formName = state.lensPane?.mode === "leveling" ? "leveling-preview" : "lens-preview";
+    el('form[data-form="' + formName + '"] details')?.setAttribute("open", "");
   },
+  "leveling-preview": async () => levelingPreview(),
+  "leveling-retain": async (fd) => levelingRetain(fd),
   "field-mark": async (fd) => {
     const coordinates = state.pendingPoint ? {native: state.pendingPoint} : {
       direction: [asNumber(fd, "bearing"), asNumber(fd, "elevation")]};

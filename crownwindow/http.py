@@ -23,8 +23,10 @@ from .demo import EXAMPLES, populate, render_observation
 from .field import direction_readout, image_readout, native_witness
 from .folio import contact_sheet, folio_csv, folio_name, make_folio, render_folio
 from .library import MAX_MARKS_PER_OBSERVATION, MAX_OBSERVATIONS_PER_STATION, MAX_RECORDS_PER_STATION, Library
+from .lean import (HOLDOUT_COLUMNS, HOLDOUT_ROWS, lean_fit, lean_marks, lens_with_holdout,
+                   leveling_agreement, single_placement)
 from .mark_exchange import MAX_NOTE_BYTES, field_log, import_log
-from .projection import Lens
+from .projection import Lens, RasterHoldout
 from .packet_reader import evidence_receipt_image, inspect_packet
 from .result import Asset
 from .sky import Classifier, Controls, native_classes
@@ -212,6 +214,7 @@ def register_calibration(app: Flask, library: Library, executor: Capacity):
             if keep:
                 saved = library.add_lens(key, revision, name, lens, proof)
                 response["saved"] = saved
+                response["revision"] = library.photo(key)["revision"]
                 return response, 201
         return response
 
@@ -222,6 +225,81 @@ def register_calibration(app: Flask, library: Library, executor: Capacity):
         version = whole(data.get("revision"), "Observation revision", 1, 2_000_000)
         lens = None if data.get("lens") is None else identifier(data.get("lens"), "Lens")
         return {"photo": library.switch_lens(key, version, lens)}
+
+    @app.post("/api/photos/<key>/leveling")
+    def leveling_preview(key):
+        data = _request()
+        fields(data, "revision", "lens", "marks", "threshold")
+        with executor:
+            source = _stored_source(library, key)
+            revision = _check_version(source, data.get("revision"))
+            template = Lens.parse(data.get("lens"))
+            marks = lean_marks(data.get("marks"))
+            threshold = real(data.get("threshold", 2.5), "Placement disagreement threshold", .1, 12)
+            fixed, fixed_fit, fixed_warnings = lean_fit(source.camera, template, marks, "fixed_circle")
+            try:
+                adjusted, adjusted_fit, adjusted_warnings = lean_fit(source.camera, template, marks, "adjusted_circle")
+            except Problem as error:
+                adjusted = adjusted_fit = adjusted_warnings = None
+                adjusted_error = str(error)
+            if adjusted is None:
+                analysis = single_placement(source.camera, fixed, fixed_fit, fixed_warnings, adjusted_error)
+            else:
+                analysis = leveling_agreement(source.camera, fixed, adjusted, fixed_fit, adjusted_fit,
+                                              fixed_warnings, adjusted_warnings, threshold)
+            image_titles = (("panel", "leveling-placement.png", "Both placements over the original"),
+                            ("angular", "leveling-agreement.png", "Concordant and withheld directions"),
+                            ("native", "leveling-on-source.png", "Agreement painted on the camera"))
+            assets = [_preview(name, label, analysis["images"][key])
+                      for key, name, label in image_titles if analysis["images"][key] is not None]
+            payload = {k: v for k, v in analysis.items() if k != "images"}
+            payload.update({"revision": revision, "assets": assets,
+                            "fingerprint": key_of({"template": template.public(), "marks": [m.public() for m in marks],
+                                                   "threshold": threshold, "analysis": {
+                                                       "fits": payload["fits"], "holdouts": payload["holdouts"]}})})
+        return payload
+
+    @app.post("/api/photos/<key>/leveling/retain")
+    def leveling_retain(key):
+        data = _request()
+        fields(data, "revision", "title", "mode", "holdout", "holdout_data", "lens",
+               "placements", "retain", "expected", "fingerprint")
+        name = text(data.get("title"), "Leveled lens title", 78, default="Leveled placement")
+        keep = boolean(data.get("retain", False), "Retain lens")
+        available = tuple(items(data.get("placements", []), "Available placements", 1, 2))
+        chosen = enum(data.get("mode"), "Leveled placement", ("fixed_circle", "adjusted_circle"))
+        if chosen not in available:
+            raise Problem("That placement is not available for the current corner set.")
+        holdout_kind = enum(data.get("holdout"), "Withheld belt", ("none", "disputed", "cautious"))
+        with executor:
+            source = _stored_source(library, key)
+            revision = _check_version(source, data.get("revision"))
+            lens = Lens.parse(data.get("lens"))
+            if not lens.tilted:
+                raise Problem("Retain a leveled placement that recovered a non-zero optical-axis tilt.")
+            holdout = None
+            if holdout_kind != "none":
+                raster = RasterHoldout.parse(data.get("holdout_data"))
+                if raster is None or raster.columns != HOLDOUT_COLUMNS or raster.rows != HOLDOUT_ROWS:
+                    raise Problem("The withheld belt must come from a current leveling preview.")
+                holdout = raster
+            lens = lens_with_holdout(lens, holdout)
+            proof = {"mode": "leveling", "placement": chosen, "holdout": holdout_kind,
+                     "holdout_cells": holdout.cell_count() if holdout else 0,
+                     "preview_fingerprint": data.get("fingerprint")}
+            fingerprint = key_of({"title": name, "source": source.public(), "lens": lens.public()})
+            if keep and data.get("expected") != fingerprint:
+                raise Problem("Review this exact leveled placement before keeping it.", 409)
+            images = _alignment_images(source, lens, [])
+            response = {"title": name, "revision": revision, "lens": lens.public(), "fit": proof,
+                        "coverage": lens_limits(lens, source.camera), "fingerprint": fingerprint,
+                        "assets": images}
+            if keep:
+                saved = library.add_lens(key, revision, name, lens, proof)
+                response["saved"] = saved
+                response["revision"] = library.photo(key)["revision"]
+                return response, 201
+        return response
 
 
 def _alignment_images(source: Source, lens: Lens, residuals: list[dict]) -> list[dict]:

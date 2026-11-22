@@ -58,7 +58,7 @@ class Calibration:
 def _from_parameters(vector: np.ndarray, template: Lens) -> Lens:
     cx, cy, radius, north = vector
     return Lens((float(cx), float(cy)), float(radius), template.maximum_zenith,
-                float(north) % 360, template.model)
+                float(north) % 360, template.model, template.lean, template.holdout)
 
 
 def _landmark_arrays(landmarks: tuple[Landmark, ...], camera: Camera) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

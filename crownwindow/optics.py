@@ -16,7 +16,7 @@ from .visual import GOLD, MINT, PINK, border_color_at, comparison_panel, height_
 def _radial_model(source: Source, model: str) -> Lens:
     base = source.lens
     return Lens(base.center_uv, base.radius_over_short_side, base.maximum_zenith,
-                base.north_clockwise, model)
+                base.north_clockwise, model, base.lean, base.holdout)
 
 
 def _outlier_pressure(rows: list[dict], percentile: float) -> dict:
